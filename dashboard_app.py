@@ -11,7 +11,7 @@ from BTC_Data_Pipline import BTCDataLoader
 # -------------------------
 # Load data using data pipeline class
 # -------------------------
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_time=True, show_spinner=True)
 def load_data():
     loader = BTCDataLoader(kaggle_dataset="mczielinski/bitcoin-historical-data")
     df_hourly, df_daily = loader.load_and_clean(save_dir=None)
@@ -33,6 +33,7 @@ with st.sidebar:
 
 # -------------------------
 # PAGE 1 — VISUALIZATIONS
+# (unchanged from your original — kept intact)
 # -------------------------
 if selected == "Visualizations":
     st.title("📊 Bitcoin Market Visualizations")
@@ -100,173 +101,183 @@ if selected == "Visualizations":
     st.info("Data pulled automatically through BTCDataLoader → cleaned → resampled → visualized.")
     st.info("Data Source: [Kaggle - Bitcoin Historical Data](https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data)")
 
-
 # -------------------------
-# PAGE 2 — FORECASTING
+# PAGE 2 — FORECASTING (Simplified + Enhanced Naive/SMA)
 # -------------------------
 if selected == "Forecasting":
-    st.title("📈 Bitcoin Forecasting / Predictive Modeling")
-    st.write("Use **daily closing prices** for forecasting models.")
-    df = df_daily.copy()
+    st.title("📈 Bitcoin Forecasting — Naive & SMA")
+    st.write("Forecasting uses **daily closing prices**. Simple baseline models: Naive (last value or with drift) and SMA-extension (with optional momentum). ")
 
-    # ensure index is datetime and sorted
+    df = df_daily.copy()
+    # Ensure datetime index, daily frequency, forward-fill missing days
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
-
     if "Close" not in df.columns:
         st.error("Daily dataset has no 'Close' column — cannot forecast.")
     else:
-        st.subheader("Close price (history)")
+        st.subheader("Historical Close Price")
         st.line_chart(df["Close"], height=300)
 
-        # Basic controls
+        # Controls
         st.subheader("Forecast settings")
         days_ahead = int(st.number_input("Forecast days ahead:", 1, 365, 14))
-        model_choice = st.selectbox("Model:", ["Naive (last value)", "SMA-extension", "ARIMA (statsmodels)", "Prophet (if installed)"])
+        model_choice = st.selectbox("Model:", ["Naive (last value / last value + drift)", "SMA-extension (optionally + momentum)"])
         test_size_days = int(st.slider("Holdout size (days) for quick validation", 7, 90, 30))
 
-        # prepare series
-        series = df["Close"].asfreq('D').fillna(method="ffill")  # daily freq, forward-fill any missing days
+        # Series prepared at daily frequency
+        series = df["Close"].asfreq('D').fillna(method="ffill")
 
-        # train/test split
+        # train/test
         train = series.iloc[:-test_size_days]
         test = series.iloc[-test_size_days:]
+        st.markdown(f"Training on **{train.index[0].date()} → {train.index[-1].date()}** ({len(train)} days). "
+                    f"Testing on **{test.index[0].date()} → {test.index[-1].date()}** ({len(test)} days).")
 
-        st.markdown(f"Training on {train.index[0].date()} → {train.index[-1].date()} ({len(train)} days). "
-                    f"Testing on {test.index[0].date()} → {test.index[-1].date()} ({len(test)} days).")
-
-        # utility: plot function (historical + forecast + CI)
-        def plot_forecast(train_series, test_series, forecast_index, forecast_mean, conf_int=None, title="Forecast"):
+        # plotting helper
+        def plot_forecast(train_series, test_series, forecast_index, forecast_mean, conf_lower=None, conf_upper=None, title="Forecast"):
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=train_series.index, y=train_series.values, mode='lines', name='Train'))
             fig.add_trace(go.Scatter(x=test_series.index, y=test_series.values, mode='lines', name='Test', line=dict(dash='dash')))
             fig.add_trace(go.Scatter(x=forecast_index, y=forecast_mean, mode='lines', name='Forecast', line=dict(width=2)))
-            if conf_int is not None:
-                # conf_int expected as DataFrame with columns ['lower', 'upper'] and same index as forecast_index
-                lower = conf_int.iloc[:, 0].values
-                upper = conf_int.iloc[:, 1].values
+            if conf_lower is not None and conf_upper is not None:
                 fig.add_trace(go.Scatter(
                     x=list(forecast_index) + list(forecast_index[::-1]),
-                    y=list(upper) + list(lower[::-1]),
+                    y=list(conf_upper) + list(conf_lower[::-1]),
                     fill='toself',
-                    fillcolor='rgba(0,100,80,0.1)',
+                    fillcolor='rgba(0,100,80,0.12)',
                     line=dict(color='rgba(255,255,255,0)'),
                     hoverinfo="skip",
                     showlegend=True,
-                    name='Confidence Interval'
+                    name='CI'
                 ))
             fig.update_layout(height=480, title=title, xaxis_title="Date", yaxis_title="Close Price")
             st.plotly_chart(fig, use_container_width=True)
 
-        # model implementations
+        # utility: compute MAE
         from sklearn.metrics import mean_absolute_error
 
-        if model_choice == "Naive (last value)":
-            last = train.iloc[-1]
+        # utility: compute simple volatility-based CI for multi-day horizon
+        def horizon_ci_from_returns(series_train, forecast_mean, alpha=1.96):
+            """
+            Use historical daily log-return std to estimate CI for multi-day forecast:
+            sigma_h = sigma_daily * sqrt(h)
+            then +/- alpha * sigma_h applied in price space via multiplicative log-normal approx.
+            Returns lower, upper arrays aligned to forecast_mean index.
+            """
+            # use log returns to model multiplicative uncertainty
+            logr = np.log(series_train / series_train.shift(1)).dropna()
+            sigma_daily = logr.std()
+            if pd.isna(sigma_daily) or sigma_daily == 0:
+                # fallback to small constant
+                sigma_daily = 1e-4
+            horizons = np.arange(1, len(forecast_mean) + 1)
+            sigma_h = sigma_daily * np.sqrt(horizons)
+            # forecast_mean may be array; apply log-normal CI: lower = mean * exp(-alpha*sigma_h), upper = mean * exp(alpha*sigma_h)
+            lower = forecast_mean * np.exp(-alpha * sigma_h)
+            upper = forecast_mean * np.exp(alpha * sigma_h)
+            return lower, upper
+
+        # run chosen model
+        if model_choice.startswith("Naive"):
+            st.markdown("**Naive model options** — constant last value or include drift (average daily change).")
+            use_drift = st.checkbox("Include drift (average daily change over last N days)", value=True)
+            drift_window = int(st.number_input("Drift window (days)", 1, 90, 14)) if use_drift else None
+
+            last_val = train.iloc[-1]
             future_index = pd.date_range(series.index[-1], periods=days_ahead + 1, freq='D')[1:]
-            forecast_vals = np.repeat(last, len(future_index))
-            # quick eval: using test
-            pred_test = np.repeat(last, len(test))
+
+            if not use_drift:
+                forecast_vals = np.repeat(last_val, len(future_index))
+                pred_test = np.repeat(last_val, len(test))
+            else:
+                # compute average daily change (not percent) over drift_window on train tail
+                drift_window = max(1, drift_window)
+                recent = train.iloc[-drift_window:]
+                avg_daily_change = (recent.diff().dropna().mean())  # this is scalar (pandas Series -> value)
+                # If recent.diff().mean() is a Series, extract value
+                if hasattr(avg_daily_change, 'item'):
+                    avg_daily_change = avg_daily_change.item()
+                # build forecast by adding avg_daily_change cumulatively
+                forecast_vals = np.array([last_val + avg_daily_change * (i + 1) for i in range(len(future_index))])
+                pred_test = np.array([train.iloc[-1] + avg_daily_change * (i + 1) for i in range(len(test))])
+
             mae = mean_absolute_error(test.values, pred_test)
             st.write(f"MAE on holdout: {mae:,.4f}")
-            plot_forecast(train, test, future_index, forecast_vals, conf_int=None, title="Naive Forecast (last value)")
 
-        elif model_choice == "SMA-extension":
-            # ensure SMA exists or compute a simple one
-            sma_window = st.slider("SMA window (days)", 5, 200, 30)
-            if "SMA" not in df.columns:
-                sma_series = series.rolling(window=sma_window, min_periods=1).mean()
-            else:
-                sma_series = df["SMA"].asfreq('D').fillna(method='ffill')
+            # confidence intervals via historical returns
+            conf_lower, conf_upper = horizon_ci_from_returns(train, forecast_vals)
+
+            plot_forecast(train, test, future_index, forecast_vals, conf_lower=conf_lower, conf_upper=conf_upper,
+                          title=f"Naive Forecast {'with drift' if use_drift else '(last value)'}")
+
+            # prepare download
+            out_df = pd.DataFrame({
+                "forecast_date": future_index,
+                "forecast": forecast_vals,
+                "ci_lower": conf_lower,
+                "ci_upper": conf_upper
+            }).set_index("forecast_date")
+            csv = out_df.to_csv().encode('utf-8')
+            st.download_button("Download forecast CSV", csv, file_name="btc_naive_forecast.csv", mime="text/csv")
+
+        elif model_choice.startswith("SMA"):
+            st.markdown("**SMA-extension** — forecast = last SMA, optionally add a small momentum/trend component.")
+            sma_window = int(st.slider("SMA window (days)", 3, 300, 30))
+            sma_series = series.rolling(window=sma_window, min_periods=1).mean()
             last_sma = sma_series.iloc[-1]
+
+            add_momentum = st.checkbox("Add momentum (slope) to extend SMA forecast", value=True)
+            momentum_window = int(st.number_input("Momentum window (days, used to compute slope)", 3, 180, 14)) if add_momentum else None
+            momentum_strength = float(st.slider("Momentum multiplier (1.0 = full slope)", 0.0, 3.0, 1.0))
+
             future_index = pd.date_range(series.index[-1], periods=days_ahead + 1, freq='D')[1:]
-            forecast_vals = np.repeat(last_sma, len(future_index))
-            pred_test = np.repeat(last_sma, len(test))
+
+            if not add_momentum:
+                forecast_vals = np.repeat(last_sma, len(future_index))
+                # test prediction (naive: repeat last_sma)
+                pred_test = np.repeat(last_sma, len(test))
+            else:
+                # compute linear slope (price change per day) over momentum_window from train tail (use SMA values)
+                momentum_window = max(3, momentum_window)
+                slope_series = sma_series.dropna()
+                if len(slope_series) < momentum_window:
+                    slope_series_used = slope_series
+                else:
+                    slope_series_used = slope_series.iloc[-momentum_window:]
+                # fit simple linear regression (slope)
+                x = np.arange(len(slope_series_used))
+                y = slope_series_used.values
+                # handle degenerate cases
+                if len(x) < 2 or np.allclose(y, y[0]):
+                    slope_per_day = 0.0
+                else:
+                    A = np.vstack([x, np.ones_like(x)]).T
+                    m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+                    slope_per_day = m  # price change per day
+                slope_per_day *= momentum_strength
+                # forecast: last_sma plus cumulative slope
+                forecast_vals = np.array([last_sma + slope_per_day * (i + 1) for i in range(len(future_index))])
+                # create test preds by applying slope from end of train
+                pred_test = np.array([last_sma + slope_per_day * (i + 1) for i in range(len(test))])
+
             mae = mean_absolute_error(test.values, pred_test)
             st.write(f"SMA window: {sma_window} days — MAE on holdout: {mae:,.4f}")
-            plot_forecast(train, test, future_index, forecast_vals, conf_int=None, title=f"SMA-extension Forecast (window={sma_window})")
+            if add_momentum:
+                st.write(f"Momentum window: {momentum_window} days — slope/day (applied): {slope_per_day:.6f}")
 
-        elif model_choice == "ARIMA (statsmodels)":
-            # try import statsmodels
-            try:
-                from statsmodels.tsa.arima.model import ARIMA
-                import warnings
-                warnings.filterwarnings("ignore")
-                st.write("Using statsmodels ARIMA. Tip: adjust p,d,q below if fit fails or residuals look bad.")
-                p = int(st.number_input("AR order (p)", 0, 10, 5))
-                d = int(st.number_input("Integration order (d)", 0, 2, 1))
-                q = int(st.number_input("MA order (q)", 0, 10, 0))
+            # confidence intervals using historical returns
+            conf_lower, conf_upper = horizon_ci_from_returns(train, forecast_vals)
 
-                # Fit on train
-                with st.spinner("Fitting ARIMA model..."):
-                    model = ARIMA(train.values, order=(p, d, q))
-                    model_fit = model.fit()
-                st.write(model_fit.summary().tables[1].as_html(), unsafe_allow_html=True)
+            plot_forecast(train, test, future_index, forecast_vals, conf_lower=conf_lower, conf_upper=conf_upper,
+                          title=f"SMA-extension Forecast (window={sma_window}{', + momentum' if add_momentum else ''})")
 
-                # Forecast the test period first (for quick validation), then forecast days_ahead beyond last date
-                start = len(train)
-                end = len(train) + len(test) - 1
-                pred_res = model_fit.get_prediction(start=start, end=end)
-                pred_mean_test = pred_res.predicted_mean
-                # calculate MAE on holdout
-                mae = mean_absolute_error(test.values, pred_mean_test)
-                st.write(f"MAE on holdout: {mae:,.4f}")
+            # download
+            out_df = pd.DataFrame({
+                "forecast_date": future_index,
+                "forecast": forecast_vals,
+                "ci_lower": conf_lower,
+                "ci_upper": conf_upper
+            }).set_index("forecast_date")
+            csv = out_df.to_csv().encode('utf-8')
+            st.download_button("Download forecast CSV", csv, file_name="btc_sma_forecast.csv", mime="text/csv")
 
-                # Forecast future
-                future_res = model_fit.get_forecast(steps=days_ahead)
-                forecast_index = pd.date_range(series.index[-1], periods=days_ahead + 1, freq='D')[1:]
-                forecast_mean = future_res.predicted_mean
-                conf_int = future_res.conf_int(alpha=0.05)  # dataframe with lower & upper columns
-
-                # conf_int index currently integer; map to forecast_index
-                conf_int.index = forecast_index
-
-                plot_forecast(train, test, forecast_index, forecast_mean, conf_int=conf_int, title=f"ARIMA({p},{d},{q}) Forecast")
-
-            except Exception as e:
-                st.error("statsmodels ARIMA is not available or model failed to fit. Install statsmodels (`pip install statsmodels`) or choose another model.")
-                st.exception(e)
-
-        elif model_choice == "Prophet (if installed)":
-            # Prophet has changed package name to 'prophet' (cmdstan/py) — try both imports
-            try:
-                try:
-                    # new package name
-                    from prophet import Prophet
-                except Exception:
-                    # fallback to fbprophet (older)
-                    from fbprophet import Prophet
-
-                st.write("Using Prophet. The series will be fit to 'ds' (date) and 'y' (close).")
-                # Prepare dataframe for Prophet
-                prophet_df = train.reset_index().rename(columns={'index': 'ds', 'Close': 'y'})
-                prophet_df = prophet_df[['ds', 'y']]
-
-                m = Prophet(daily_seasonality=True, yearly_seasonality=True, weekly_seasonality=True)
-                with st.spinner("Fitting Prophet model..."):
-                    m.fit(prophet_df)
-
-                # Make future dataframe for validation+forecast
-                future_all = m.make_future_dataframe(periods=len(test) + days_ahead, freq='D')
-                forecast_all = m.predict(future_all)
-
-                # Extract predicted values for test and future
-                pred_test = forecast_all.set_index('ds').loc[test.index]['yhat'].values
-                mae = mean_absolute_error(test.values, pred_test)
-                st.write(f"MAE on holdout: {mae:,.4f}")
-
-                # Forecast only future days_ahead
-                future_df = future_all.tail(days_ahead)
-                forecast_future = forecast_all.set_index('ds').loc[future_df['ds']]
-                forecast_index = forecast_future.index
-                forecast_mean = forecast_future['yhat'].values
-                conf_int = forecast_future[['yhat_lower', 'yhat_upper']]
-                conf_int.columns = ['lower', 'upper']
-
-                plot_forecast(train, test, forecast_index, forecast_mean, conf_int=conf_int, title="Prophet Forecast")
-
-            except Exception as e:
-                st.error("Prophet is not installed or failed to run. Install prophet (`pip install prophet`) or choose ARIMA/SMA.")
-                st.exception(e)
-
-        st.info("Note: These are quick interactive models intended for experimentation. For production forecasting consider model validation, hyperparameter tuning, cross-validation, ensembling, and more robust preprocessing (log transforms, outlier handling, exogenous regressors).")
