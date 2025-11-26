@@ -19,16 +19,23 @@ def load_data():
 
 df_hourly, df_daily = load_data()
 
+st.set_page_config(
+    page_title="BTC Dashboard",
+    page_icon="💰", 
+    layout="wide" 
+)
+
 # -------------------------
 # Sidebar navigation
 # -------------------------
 with st.sidebar:
     selected = option_menu(
-        "BTC Dashboard",
+        "Bitcoin Dashboard",
         ["Visualizations", "Forecasting"],
         icons=["bar-chart", "graph-up"],
-        menu_icon="bitcoin",
+        menu_icon="currency-bitcoin",
         default_index=0,
+        orientation="vertical",
     )
 
 # -------------------------
@@ -120,9 +127,30 @@ if selected == "Forecasting":
 
         # Controls
         st.subheader("Forecast settings")
-        days_ahead = int(st.number_input("Forecast days ahead:", 1, 365, 14))
-        model_choice = st.selectbox("Model:", ["Naive (last value / last value + drift)", "SMA-extension (optionally + momentum)"])
-        test_size_days = int(st.slider("Holdout size (days) for quick validation", 7, 90, 30))
+        days_ahead = int(st.number_input(
+            "Forecast days ahead:",
+            1, 365, 14,
+            help="Number of calendar days to forecast into the future. Short horizons tend to be more accurate."
+        ))
+
+        model_choice = st.selectbox(
+            "Model:",
+            ["Naive (last value / last value + drift)", "SMA-extension (optionally + momentum)"],
+            help=("Choose a baseline forecasting method:\n\n"
+                  "- Naive: repeats the last observed value (optionally with a small drift computed from recent daily changes). "
+                  "Good as a simple benchmark.\n\n"
+                  "- SMA-extension: uses the last Simple Moving Average (SMA) value as the baseline and optionally extends it "
+                  "by adding a small momentum term (slope) computed from recent SMA behaviour.")
+        )
+
+        # short caption -> visible explanation under selector
+        st.caption("Tip: Start with a short holdout (e.g., 14–30 days) to see quick MAE feedback. Use SMA window to control smoothing; momentum amplifies recent trends.")
+
+        test_size_days = int(st.slider(
+            "Holdout size (days) for quick validation",
+            7, 90, 30,
+            help="Number of most recent days held out for quick out-of-sample validation. Used only to compute MAE."
+        ))
 
         # Series prepared at daily frequency
         series = df["Close"].asfreq('D').fillna(method="ffill")
@@ -180,8 +208,16 @@ if selected == "Forecasting":
         # run chosen model
         if model_choice.startswith("Naive"):
             st.markdown("**Naive model options** — constant last value or include drift (average daily change).")
-            use_drift = st.checkbox("Include drift (average daily change over last N days)", value=True)
-            drift_window = int(st.number_input("Drift window (days)", 1, 90, 14)) if use_drift else None
+            use_drift = st.checkbox(
+                "Include drift (average daily change over last N days)",
+                value=True,
+                help="If checked, the forecast will add the average daily change observed over the selected drift window to the last value (linear drift)."
+            )
+            drift_window = int(st.number_input(
+                "Drift window (days)",
+                1, 90, 14,
+                help="Number of recent days used to compute average daily change (drift). A small window responds faster to recent movement."
+            )) if use_drift else None
 
             last_val = train.iloc[-1]
             future_index = pd.date_range(series.index[-1], periods=days_ahead + 1, freq='D')[1:]
@@ -218,17 +254,39 @@ if selected == "Forecasting":
                 "ci_upper": conf_upper
             }).set_index("forecast_date")
             csv = out_df.to_csv().encode('utf-8')
-            st.download_button("Download forecast CSV", csv, file_name="btc_naive_forecast.csv", mime="text/csv")
+            st.download_button(
+                "Download forecast CSV",
+                csv,
+                file_name="btc_naive_forecast.csv",
+                mime="text/csv",
+                help="Download the forecast as a CSV. Contains forecast, lower CI, upper CI."
+            )
 
         elif model_choice.startswith("SMA"):
             st.markdown("**SMA-extension** — forecast = last SMA, optionally add a small momentum/trend component.")
-            sma_window = int(st.slider("SMA window (days)", 3, 300, 30))
+            sma_window = int(st.slider(
+                "SMA window (days)",
+                3, 300, 30,
+                help="Number of days used to compute the Simple Moving Average (SMA). Larger windows produce smoother SMA."
+            ))
             sma_series = series.rolling(window=sma_window, min_periods=1).mean()
             last_sma = sma_series.iloc[-1]
 
-            add_momentum = st.checkbox("Add momentum (slope) to extend SMA forecast", value=True)
-            momentum_window = int(st.number_input("Momentum window (days, used to compute slope)", 3, 180, 14)) if add_momentum else None
-            momentum_strength = float(st.slider("Momentum multiplier (1.0 = full slope)", 0.0, 3.0, 1.0))
+            add_momentum = st.checkbox(
+                "Add momentum (slope) to extend SMA forecast",
+                value=True,
+                help="If checked, compute a recent slope from SMA values and apply it to extend the SMA forward."
+            )
+            momentum_window = int(st.number_input(
+                "Momentum window (days, used to compute slope)",
+                3, 180, 14,
+                help="Number of SMA days used to estimate the slope. Short windows react faster but are noisier."
+            )) if add_momentum else None
+            momentum_strength = float(st.slider(
+                "Momentum multiplier (1.0 = full slope)",
+                0.0, 3.0, 1.0,
+                help="Scale the estimated slope. Use <1 to dampen, >1 to amplify recent trend."
+            ))
 
             future_index = pd.date_range(series.index[-1], periods=days_ahead + 1, freq='D')[1:]
 
@@ -279,5 +337,10 @@ if selected == "Forecasting":
                 "ci_upper": conf_upper
             }).set_index("forecast_date")
             csv = out_df.to_csv().encode('utf-8')
-            st.download_button("Download forecast CSV", csv, file_name="btc_sma_forecast.csv", mime="text/csv")
-
+            st.download_button(
+                "Download forecast CSV",
+                csv,
+                file_name="btc_sma_forecast.csv",
+                mime="text/csv",
+                help="Download the SMA forecast as CSV (forecast, lower CI, upper CI)."
+            )
