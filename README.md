@@ -7,6 +7,23 @@ This project is an end-to-end **Bitcoin market analytics and forecasting applica
 
 The core objective is to analyze historical Bitcoin market data (OHLCV), communicate insights through clear visualizations for non-technical stakeholders, and provide simple baseline forecasting models for short-term price trends.
 
+
+---
+
+## ▶️ How to Run the Project
+
+Follow the steps below to run the project locally and launch the interactive dashboard.
+
+    Clone the Repository: 
+      - git clone https://github.com/Mun-Min/Bitcoin_Forecasting.git
+      - cd <your-project-folder>
+
+    Install core libraries: 
+      - pip install pandas numpy scikit-learn matplotlib seaborn plotly streamlit
+
+    Run the dashboard: 
+      - streamlit run dashboard_app.py
+
 ---
 
 ## 🎯 Key Features
