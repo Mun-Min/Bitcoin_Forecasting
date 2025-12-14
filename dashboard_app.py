@@ -109,7 +109,7 @@ if selected == "Visualizations":
     st.info("Data Source: [Kaggle - Bitcoin Historical Data](https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data)")
 
 # -------------------------
-# PAGE 2 — FORECASTING (Simplified + Enhanced Naive/SMA)
+# PAGE 2 — FORECASTING 
 # -------------------------
 if selected == "Forecasting":
     st.title("📈 Bitcoin Forecasting — Naive & SMA")
