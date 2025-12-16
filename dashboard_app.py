@@ -40,7 +40,7 @@ with st.sidebar:
 
 # -------------------------
 # PAGE 1 — VISUALIZATIONS
-# (unchanged from your original — kept intact)
+# 
 # -------------------------
 if selected == "Visualizations":
     st.title("📊 Bitcoin Market Visualizations")
