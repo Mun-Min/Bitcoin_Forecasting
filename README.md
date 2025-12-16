@@ -24,6 +24,8 @@ Follow the steps below to run the project locally and launch the interactive das
     Run the dashboard: 
       - streamlit run dashboard_app.py
 
+[**🎈 Click to run application using Streamlit cloud! 🎈**](https://bitcoin-forcasting.streamlit.app/) 
+
 ---
 
 ## 🎯 Key Features
